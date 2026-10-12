@@ -1,0 +1,6 @@
+# Default locations used by the Makefile (DATA_DIR=../data, OUTPUT_DIR=../output)
+data/
+output/
+
+# macOS
+.DS_Store

@@ -1,0 +1,435 @@
+ANALYSIS PIPELINE: PSEUDOCODE DESCRIPTION
+==========================================
+
+The pipeline is orchestrated by a Makefile (run from code/) that runs two tools
+(Python and Stata-MP) to transform raw data into all figures, tables, and
+reported statistics for the paper. Steps execute conditionally: a step is
+re-run only if its inputs are newer than its outputs (each Stata script has a
+hidden "stamp" file that records completion).
+
+Step numbers below follow the "Step N" comments in the Makefile (Steps 0-4,
+5a-5c, then 6-27).
+
+TWO MODES (set with USE_SYNTHETIC; default is 1)
+
+  USE_SYNTHETIC=1  (public replication path, default)
+      Steps 0-3 are replaced by a single step that runs
+      replication/generate_synthetic.py to create
+      Analysis/BabyConnect/full/bc_full_sample_formatted.dta directly.
+      The balanced-panel appendix (Steps 5b and 14) is skipped.
+
+  USE_SYNTHETIC=0  (confidential raw data)
+      Runs Steps 0-3 (below) from the 162 raw CSV files, and also builds the
+      balanced-panel appendix (Steps 5b and 14).
+
+Stata scripts write execution logs to output/Log/. Check these logs to verify successful execution.
+
+------------------------------------------------------------------------------
+STEP 0 — INSTALL STATA DEPENDENCIES (confidential-data mode only)
+------------------------------------------------------------------------------
+Script:  setup/install_stata_deps.do
+Output:  stamp file (.stata_deps_done)
+Note:    In synthetic mode this step is not run by make; run
+         setup/install_stata_deps.do manually (see README).
+
+  INSTALL gtools, require, reghdfe, ftools, egenmore, listtex, winsor2 from SSC
+  (if not already installed)
+
+
+------------------------------------------------------------------------------
+STEP 1 — RAW IMPORT (Python; confidential-data mode only)
+------------------------------------------------------------------------------
+Input:   162 anonymized CSV files (bc-anon-2211-1.csv … bc-anon-2211-162.csv)
+         in the raw BabyConnect directory
+Script:  cleaning/importing/data_clean_import.py
+Output:  162 individual .dta files in Intermediate/BabyConnect/raw_bc_stata/,
+         plus a stamp file (.import_done)
+
+  FOR each of the 162 raw CSV files:
+      Parse and clean the CSV
+      Write a corresponding Stata .dta file
+  WRITE a timestamp file to record completion
+
+
+------------------------------------------------------------------------------
+STEP 2 — STATA APPEND/IMPORT (confidential-data mode only)
+------------------------------------------------------------------------------
+Input:   162 .dta files from Step 1
+Script:  cleaning/importing/bc_import_part.do
+Output:  Intermediate/BabyConnect/bc_full_cleaned.dta
+
+  LOAD all 162 individual .dta files
+  APPEND them into a single dataset
+  SAVE as bc_full_cleaned.dta
+
+
+------------------------------------------------------------------------------
+STEP 3 — FORMAT / STANDARDIZE DATA (confidential-data mode only)
+------------------------------------------------------------------------------
+Input:   bc_full_cleaned.dta
+Script:  cleaning/prep/bc_data_format.do
+Output:  Analysis/BabyConnect/full/bc_full_sample_formatted.dta
+
+  LOAD bc_full_cleaned.dta
+  APPLY variable formatting, labeling, and standardization
+  SAVE as bc_full_sample_formatted.dta
+
+
+------------------------------------------------------------------------------
+SYNTHETIC DATA GENERATION (replaces Steps 0-3 when USE_SYNTHETIC=1)
+------------------------------------------------------------------------------
+Script:  replication/generate_synthetic.py
+Output:  Analysis/BabyConnect/full/bc_full_sample_formatted.dta
+         (same name and layout as the output of Step 3)
+
+  GENERATE records for random children plus a set of guaranteed-"survivor"
+      children observed on nearly every day
+  WRITE the result as bc_full_sample_formatted.dta
+  (Build target: make synthetic)
+
+
+------------------------------------------------------------------------------
+STEP 4 — SAMPLE CREATION FOR FIGURES 1–4
+------------------------------------------------------------------------------
+Input:   bc_full_sample_formatted.dta
+Scripts: sample_creation.do (master), calling:
+           cleaning_tools.do                        — utility functions
+           base_sample_restriction.do              — main sample filters
+           prep_milk_prod_pct_restrict_graph.do     — filter by milk production pctile
+           feed_sample_restriction.do              — all-feeding-events sample
+           nurse_only_sample_restriction.do         — nursing-only sample
+           conversion_sample_restriction.do         — volume conversion sample
+           conversion_estimation.do                 — estimate conversion coefficients
+           conversion_imputation.do                 — impute missing volumes
+           feeding_partition_generic.do             — partition by feeding type
+           daytime_nighttime_generic.do             — classify day vs. night sessions
+Output:  15 analysis .dta files and one stored-estimates file (.ster) used by
+         subsequent steps:
+           figure1_analysis_data.dta
+           figure1cd_analysis_data.dta
+           figure1cd_analysis_data_8_8.dta
+           figure1_cohort_analysis_data.dta
+           figure1cd_cohort_analysis_data.dta
+           figure1_analysis_nurse_only_data.dta
+           figure1cd_analysis_nurse_only_data.dta
+           figure1_analysis_feed_data.dta
+           figure1cd_analysis_feed_data.dta
+           figure23_analysis_data.dta
+           figure123_analysis_feed_data.dta
+           figure4_base_data.dta
+           figure4_analysis_data_week.dta
+           milk_prod_obs_pctile.dta
+           childid_age_fe.dta
+           logcoef_all.ster                         — conversion-model estimates
+                                                      (used by the Figure 4 steps)
+
+  LOAD bc_full_sample_formatted.dta
+  APPLY sample restrictions (observation count, session duration, age, pct thresholds)
+  ESTIMATE and IMPUTE volume conversion factors where volume is missing
+  CLASSIFY each feeding session as daytime or nighttime
+  PARTITION sessions by feeding type (breastfeeding vs. bottle)
+  SAVE the analysis datasets (and logcoef_all.ster) tailored to each figure's needs
+  (Build target: make analysis_data)
+
+
+------------------------------------------------------------------------------
+STEP 5a — FIGURE 2/3 REGRESSION PREPARATION
+------------------------------------------------------------------------------
+Input:   figure23_analysis_data.dta
+Script:  analysis/figures/main/fig23_prep.do
+Output:  fig23_regression_results.dta
+         fig23_prediction_results.dta
+
+  LOAD figure 2/3 analysis dataset
+  RUN regression of log session duration on child-age (days) indicators with
+      child fixed effects (standard errors clustered by child)
+  COMPUTE predicted margins by child age, and each child's predicted annual total
+  SAVE regression results and prediction results as .dta files
+
+
+------------------------------------------------------------------------------
+STEP 5b — FIGURE 2/3 BALANCED REGRESSION PREPARATION (confidential data only)
+------------------------------------------------------------------------------
+Input:   figure23_analysis_data.dta
+Script:  analysis/figures/appendix/fig23_balanced_prep.do
+Output:  fig23_balanced_apdx_regression_results.dta
+         fig23_balanced_apdx_prediction_results.dta
+
+NOTE: Skipped when USE_SYNTHETIC=1. Requires children who record feeding
+activity on nearly every day for ~365 consecutive days.
+
+  LOAD figure 2/3 analysis dataset
+  RESTRICT to balanced-panel children
+  RUN regression and compute predictions
+  SAVE regression and prediction results
+
+
+------------------------------------------------------------------------------
+STEP 5c — FIGURE 2/3 FEEDING REGRESSION PREPARATION
+------------------------------------------------------------------------------
+Input:   figure123_analysis_feed_data.dta
+Script:  analysis/figures/appendix/fig23_feed_prep.do
+Output:  fig23_feed_regression_results.dta
+         fig23_feed_prediction_results.dta
+
+  LOAD feeding-event analysis dataset
+  DROP children with fewer than 30 observations
+  RUN regression of log feeding-event duration on child-age (days) indicators
+      with child fixed effects
+  COMPUTE predicted margins by child age, and each child's predicted annual total
+  REPORT relevant statistics in the Stata log
+  SAVE regression and prediction results
+
+
+------------------------------------------------------------------------------
+STEP 6 — FIGURE 1 (main paper)
+------------------------------------------------------------------------------
+Input:   figure1_analysis_data.dta, figure1cd_analysis_data.dta
+Script:  analysis/figures/main/fig1_graphs.do
+Output:  7 PDFs:
+           fig1/1a_milk_dur_hist.pdf
+           fig1/1b_milk_obs_hist.pdf
+           fig1/1c_uninterrupted_day_1.pdf … 1c_uninterrupted_day_4.pdf
+           fig1/1d_milk_prod_night_count.pdf
+
+  LOAD figure 1 analysis datasets
+  PLOT histogram of daily milk-production duration (minutes per child-day)  → 1a
+  PLOT histogram of milk-production events per child-day                    → 1b
+  FOR each of 4 panels:
+      PLOT histogram of milk-production sessions across periods of the day  → 1c_1 … 1c_4
+  PLOT histogram of nighttime milk-production sessions per child-day        → 1d
+  EXPORT all panels as PDFs
+
+
+------------------------------------------------------------------------------
+STEP 7 — FIGURES 2 AND 3 (main paper)
+------------------------------------------------------------------------------
+Input:   fig23_regression_results.dta, fig23_prediction_results.dta
+         (from Step 5a)
+Script:  analysis/figures/main/fig23_graphs.do
+Output:  fig2/2_milk_logdur_margins_30.pdf
+         fig3/3_milk_logdur_sums_30.pdf
+         appendix/3_milk_logdur_sums_30_vot.pdf
+
+  LOAD pre-computed regression and prediction results from Step 5a
+  PLOT predicted minutes per day across child age (days)           → fig 2
+  PLOT histogram of each child's predicted annual total (hours),
+       valued at the median wage                                   → fig 3
+       (a revealed-preference-benchmark version goes to appendix/…_vot.pdf)
+  EXPORT PDFs
+
+
+------------------------------------------------------------------------------
+STEP 8 — FIGURE 4 (main paper)
+------------------------------------------------------------------------------
+Input:   figure4_analysis_data_week.dta, logcoef_all.ster
+Scripts: fig4_graphs.do (Stata master),
+         cleaning/prep/figure4_delta_ci.do (called by fig4_graphs.do),
+         fig4a_graph.py (Python, called internally by fig4_graphs.do)
+Output:  fig4/4a_cf_bottle_dur.pdf
+         fig4/4a_cf_bottle_dur_atus_22_23.pdf
+         fig4/4b_histogram_save_pct_diff_log.pdf
+         fig4/4b_ordered_save_pct_diff_log.pdf
+         fig4/4c_histogram_outsrcble_pct_log.pdf
+         fig4/4c_ordered_outsrcble_pct_log.pdf
+         figure4a_analysis_data_ci.csv / .dta  (in the analysis data directory)
+
+  COMPUTE delta-method confidence intervals for the counterfactual totals
+          and the mean time saved (figure4_delta_ci.do)
+  LOAD weekly figure 4 dataset and stored conversion estimates
+  COMPUTE time savings from breastfeeding vs. bottle feeding
+  PLOT histogram and ordered distribution of % time saved           → 4b
+          (the histogram marks the mean with its 95% CI)
+  PLOT histogram and ordered distribution of % non-shareable time   → 4c
+  CALL Python script to generate counterfactual bottle duration plot  → 4a
+          (run twice: default panel and an ATUS 22–23 comparison version)
+  EXPORT PDFs
+
+
+------------------------------------------------------------------------------
+STEPS 9–24 — APPENDIX FIGURES
+------------------------------------------------------------------------------
+Each step mirrors its main-paper counterpart for specific robustness or
+subgroup panels. PDFs are written to the appendix/ output folder unless noted.
+(Build target: make all_apdx_figures)
+
+  Step 9  | Fig 1 panels by age cohort (3 age groups)
+            Input:  figure1_cohort_analysis_data.dta,
+                    figure1cd_cohort_analysis_data.dta
+            Script: analysis/figures/appendix/fig1_cohort_apdx.do
+            Output: 21 PDFs in appendix/first_year/ (histograms and
+                    day-pattern panels × 3 age groups)
+
+  Step 10 | Fig 1 for feeding events; 8am–8pm window
+            Input:  figure1_analysis_feed_data.dta,
+                    figure1cd_analysis_feed_data.dta,
+                    figure1cd_analysis_data_8_8.dta
+            Script: analysis/figures/appendix/fig1_feed_apdx.do
+            Output: 12 PDFs
+
+  Step 11 | Fig 1 year-over-year comparison
+            Input:  figure1_analysis_data.dta, figure1cd_analysis_data.dta
+            Script: analysis/figures/appendix/fig1_year_apdx.do
+            Output: 7 PDFs
+
+  Step 12 | Cohort entry/exit plot; creates intersect datasets
+            Input:  figure1_cohort_analysis_data.dta
+            Script: cleaning/prep/cohort_selection.do
+                    (also runs feeding_partition_generic.do and
+                     daytime_nighttime_generic.do on the intersect sample)
+            Output: appendix/entry_exit_cohort.pdf,
+                    figure1_cohort_analysis_data_intrsct.dta,
+                    figure1cd_analysis_data_intrsct.dta
+
+  Step 13 | Fig 1 cohort panels for the intersecting cohort
+            Input:  intersect .dta files from Step 12
+            Script: analysis/figures/appendix/fig1_cohort_intersect_apdx.do
+            Output: 21 PDFs in appendix/
+
+  Step 14 | Balanced-panel version of Fig 3 (confidential data only)
+            Input:  fig23_balanced_apdx_regression_results.dta,
+                    fig23_balanced_apdx_prediction_results.dta
+                    (from Step 5b)
+            Script: analysis/figures/appendix/fig23_balanced_apdx.do
+            Output: 2 PDFs (2_milk_logdur_margins_30_full.pdf,
+                            3_milk_logdur_sums_30_full.pdf)
+
+  Step 15 | Figs 2 and 3 replicated for feeding events
+            Input:  fig23_feed_regression_results.dta,
+                    fig23_feed_prediction_results.dta
+                    (from Step 5c)
+            Script: analysis/figures/appendix/fig23_feed_apdx.do
+            Output: 2 PDFs (2_feed_logdur_margins_30.pdf,
+                            3_feed_logdur_sums_30.pdf)
+
+  Step 16 | Milk production restriction graph (365-day window)
+            Input:  milk_prod_obs_pctile.dta
+            Script: analysis/figures/appendix/milk_prod_apdx.do
+            Output: appendix/milk_production_count_365_day.pdf
+
+  Step 17 | Regression coefficient margins plot
+            Input:  bc_full_sample_formatted.dta
+            Script: analysis/figures/appendix/margins_apdx.do
+            Output: appendix/reg_coef_marginsplot.pdf
+
+  Step 18 | Fig 4 session-type histograms and intersect cohort
+            Input:  figure4_analysis_data_week.dta, logcoef_all.ster
+            Script: analysis/figures/appendix/fig4_hist_intrsct_apdx.do
+                    (calls figure4_delta_ci.do and fig4a_graph.py)
+            Output: 7 PDFs, plus figure4a_analysis_intrsct_data_ci.csv / .dta
+
+  Step 19 | Fig 4 restricted to first quarter of life
+            Input:  figure4_analysis_data_week.dta, logcoef_all.ster
+            Script: analysis/figures/appendix/fig4_first_qtr_apdx.do
+                    (calls figure4_delta_ci.do and fig4a_graph.py)
+            Output: 5 PDFs, plus figure4a_first_quarter_data_ci.csv / .dta
+
+  Step 20 | Breastfeeding continuation curve versus CDC
+            Input:  bc_full_sample_formatted.dta,
+                    figure1_analysis_feed_data.dta
+            Script: analysis/figures/appendix/continuation_curve.do
+                    (uses cleaning_tools.do, cont_curve_sample_restriction.do)
+            Output: appendix/continuation_survival_app_vs_cdc.pdf,
+                    feed_full_data.dta (intermediate)
+
+  Step 21 | Fig 1 for narrower age windows (31–60 and 61–90 days)
+            Input:  figure1_analysis_data.dta, figure1cd_analysis_data.dta
+            Script: analysis/figures/appendix/fig1_age_windows_apdx.do
+            Output: 14 PDFs
+
+  Step 22 | Fig 1 for nursing-only children
+            Input:  figure1_analysis_data.dta,
+                    figure1_analysis_nurse_only_data.dta,
+                    figure1cd_analysis_nurse_only_data.dta
+            Script: analysis/figures/appendix/fig1_nursing_only_apdx.do
+            Output: 7 PDFs
+
+  Step 23 | Nighttime-logging robustness
+            Input:  figure1_analysis_data.dta, figure1cd_analysis_data.dta
+            Script: analysis/figures/appendix/nighttime_robustness.do
+            Output: appendix/1d_milk_prod_night_count_late_loggers.pdf,
+                    appendix/night_hour_logging_dist.pdf
+
+  Step 24 | Pumping share by child age
+            Input:  figure23_analysis_data.dta
+            Script: analysis/figures/appendix/pumping_by_age.do
+            Output: appendix/avg_pumping_share_by_age_ma7.pdf
+
+
+------------------------------------------------------------------------------
+STEP 25 — SUMMARY STATISTICS TABLES
+------------------------------------------------------------------------------
+Input:   figure23_analysis_data.dta
+Script:  analysis/stats/summary_tables.do
+Output:  Tables/full/stats_by_country.tex
+         Tables/full/stats_by_year.tex
+
+  LOAD figure 2/3 analysis dataset
+  COMPUTE summary statistics (means, SDs, counts) stratified by country
+  COMPUTE summary statistics stratified by year
+  EXPORT two LaTeX tables
+  (Build target: make all_tables)
+
+
+------------------------------------------------------------------------------
+STEPS 26 AND 27 — SAMPLE SUMMARIES AND COHORT STATISTICAL TESTS
+------------------------------------------------------------------------------
+These scripts report descriptive statistics and statistical test results
+directly in Stata log files (output/Log/).
+
+  Step 26 | sample_summary.do   (analysis/stats/)
+    Inputs: Figure 2/3 analysis data, Figure 4 base data,
+            child-age-week fixed effects, and cohort analysis data
+    Content: Sample characteristics, descriptive statistics,
+             and cohort coverage
+    (Build target: make sample_summary)
+
+  Step 27 | fig1_cohort_stats.do   (analysis/stats/)
+    Inputs: Regular and intersection cohort analysis data
+    Content: ANOVA tests of daily milk-production duration and
+             session counts across age cohorts, with Bonferroni-
+             adjusted pairwise comparisons
+    (Build target: make fig1_cohort_stats)
+
+Both scripts are included in the main Makefile's "all" target.
+
+
+------------------------------------------------------------------------------
+CONVENIENCE BUILD TARGETS
+------------------------------------------------------------------------------
+
+  make dirs               Create the data/ and output/ directory structure
+  make synthetic          Generate only bc_full_sample_formatted.dta
+  make analysis_data      Build all analysis .dta files (Step 4)
+  make all_figures        Build all main paper figures (Steps 6–8)
+  make all_apdx_figures   Build all appendix figures (Steps 9–24;
+                          Step 14 only when USE_SYNTHETIC=0)
+  make all_tables         Build summary statistics tables (Step 25)
+  make sample_summary     Sample descriptive statistics (Step 26)
+  make fig1_cohort_stats  Figure 1 cohort statistical tests (Step 27)
+  make all                Build everything (all of the above)
+
+Add USE_SYNTHETIC=0 to any target to use the confidential raw-data path.
+Run all targets from the code/ directory.
+
+
+------------------------------------------------------------------------------
+OVERALL DATA FLOW SUMMARY
+------------------------------------------------------------------------------
+
+  Confidential path (USE_SYNTHETIC=0):
+  162 raw CSVs
+      → [Python]        → 162 individual .dta files
+      → [Stata]         → bc_full_cleaned.dta
+      → [Stata]         → bc_full_sample_formatted.dta
+
+  Public synthetic path (USE_SYNTHETIC=1):
+  generate_synthetic.py
+      → [Python]        → bc_full_sample_formatted.dta
+
+  Both paths, from here:
+  bc_full_sample_formatted.dta
+      → [Stata]         → 15 figure-specific analysis .dta files + logcoef_all.ster
+      → [Stata + Python] → PDFs for all main and appendix figures
+                         → LaTeX tables
+                         → sample and cohort statistics in Stata logs
